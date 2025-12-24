@@ -1,1 +1,20 @@
+= Svalinn
+:toc: auto
+:toclevels: 2
 
+Svalinn Project: A Rescript-powered edge shield (Deno) guarding a custom OCI runtime fortress (Vörðr). Post-cloud security architecture.
+
+== Overview
+
+Svalinn implements a post-cloud security architecture combining:
+
+* **Edge Shield** - ReScript-powered edge computing layer running on Deno
+* **Vörðr** - Custom OCI runtime for container isolation
+
+== Tech Stack
+
+* ReScript, Deno, Bash, ArangoDB, OCI Runtime
+
+== License
+
+AGPL-3.0-or-later
