@@ -1,136 +1,121 @@
-= Svalinn / Cerro Torre Integration Architecture
-:status: draft-normative
-:audience: maintainers, implementers, security auditors
-:keywords: integration, seam, attack surface, trust boundary
+= Svalinn / Cerro Torre Integration
+:status: draft
+:audience: maintainers, implementers
+:spec-repo: https://github.com/hyperpolymath/verified-container-spec
 
-== 0. Purpose
+== 1. Overview
 
-This document defines how Svalinn (runtime security) consumes artefacts from Cerro Torre (supply-chain verification). Both projects function completely independently, but when used together, they form an end-to-end verified container system.
+This document describes how Svalinn/Vordr consumes artefacts from Cerro Torre. For the shared protocol specifications, see the link:{spec-repo}[Verified Container Spec] repository.
 
-This is the Svalinn-side perspective. See `cerro-torre/spec/svalinn-integration.adoc` for the Cerro Torre perspective.
+Both projects implement the *Verified Container Protocol* as independent *Protocol Peers* - like HTTP servers and browsers implementing the HTTP spec.
 
-== 1. Relationship Overview
+== 2. Shared Protocol
+
+Both projects implement these shared specifications:
+
+[cols="2,3"]
+|===
+| Specification | Purpose
+
+| link:{spec-repo}/blob/main/spec/attestation-bundle.adoc[Attestation Bundle]
+| Package format for in-toto statements with log proofs
+
+| link:{spec-repo}/blob/main/spec/trust-store.adoc[Trust Store]
+| Key distribution with threshold groups and log operators
+
+| link:{spec-repo}/blob/main/spec/verification-protocol.adoc[Verification Protocol]
+| Step-by-step verification procedure (Svalinn implements this)
+
+| link:{spec-repo}/blob/main/spec/transparency-log.adoc[Transparency Log]
+| Federated log requirements (2-of-3 quorum)
+|===
+
+== 3. Role Division
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          CERRO TORRE                                     │
-│                    (Supply-Chain Verification)                           │
-│                                                                          │
+│                         (PRODUCER Role)                                  │
+├─────────────────────────────────────────────────────────────────────────┤
 │  Produces:                                                               │
 │  - OCI container images with cryptographic provenance                    │
-│  - in-toto attestation bundles (SLSA provenance)                        │
-│  - Threshold signatures (k-of-n Ed25519)                                │
+│  - Attestation bundles (in-toto + SLSA provenance)                      │
+│  - Threshold signatures (FROST-Ed25519)                                 │
 │  - Transparency log entries                                              │
-│  - SELinux policies (CIL format)                                        │
 └────────────────────────────────────────────────────────────────────────┬┘
                                                                           │
                         ┌─────────────────────────────────────────────────┘
-                        │
+                        │  VERIFIED CONTAINER
+                        │      PROTOCOL
                         ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            SVALINN                                       │
-│                      (Runtime Security)                                  │
-│                                                                          │
+│                         (CONSUMER Role)                                  │
+├─────────────────────────────────────────────────────────────────────────┤
 │  Consumes:                                                               │
 │  - OCI images (standard format)                                          │
-│  - Attestation bundles (verifies before execution)                       │
+│  - Attestation bundles (verifies per shared protocol)                    │
 │  - Trust store (public keys for verification)                            │
 │                                                                          │
 │  Provides:                                                               │
-│  - Gatekeeper: SPARK-verified policy validation                          │
+│  - Gatekeeper: SPARK-verified attestation verification                   │
 │  - Vordr: Secure container lifecycle                                     │
 │  - Runtime enforcement of security policies                              │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-== 2. What Svalinn Receives
+== 4. Svalinn Consumer Responsibilities
 
-=== 2.1 OCI Image
+As a *Consumer*, Svalinn implements the link:{spec-repo}/blob/main/spec/verification-protocol.adoc[Verification Protocol]:
 
-Standard OCI Image Specification v1.1+:
-* Image manifest (`application/vnd.oci.image.manifest.v1+json`)
-* Image config (`application/vnd.oci.image.config.v1+json`)
-* Layer blobs (`application/vnd.oci.image.layer.v1.tar+gzip`)
+=== 4.1 Attestation Verification (Gatekeeper)
 
-Svalinn MUST NOT assume images come from Cerro Torre. Any OCI-compliant image works.
+* Fetch attestation bundle via OCI Referrers API
+* Parse and validate bundle structure
+* Verify DSSE envelope signatures (Ed25519)
+* Verify threshold signatures (FROST-Ed25519)
+* Verify log inclusion proofs (2-of-3 quorum)
 
-=== 2.2 Attestation Bundle (Optional but Recommended)
+=== 4.2 Trust Store Management
 
-When present, provides cryptographic proof of provenance:
+* Load trust store from local file
+* Verify trust store update signatures
+* Key lookup by ID and role
+* Threshold group resolution
 
-```json
-{
-  "mediaType": "application/vnd.cerro-torre.bundle+json",
-  "attestations": [
-    {
-      "_type": "https://in-toto.io/Statement/v1",
-      "subject": [{ "name": "...", "digest": { "sha256": "..." } }],
-      "predicateType": "https://slsa.dev/provenance/v1",
-      "predicate": { ... }
-    }
-  ],
-  "logEntries": [
-    { "logId": "...", "logIndex": 12345, "inclusionProof": "..." }
-  ]
-}
-```
+=== 4.3 Policy Enforcement
 
-=== 2.3 Trust Store
+* Reject on verification failure (strict mode)
+* Apply Gatekeeper policies after verification
+* Log all verification decisions
 
-JSON format for public keys:
+== 5. Independence Guarantees
 
-```json
-{
-  "version": 1,
-  "keys": {
-    "releasers": [
-      { "id": "...", "algorithm": "ed25519", "publicKey": "..." }
-    ],
-    "transparency-logs": [
-      { "id": "...", "algorithm": "ed25519", "publicKey": "..." }
-    ]
-  },
-  "thresholds": {
-    "release-signers": { "k": 3, "n": 5 }
-  }
-}
-```
+=== 5.1 Svalinn Operates Without Cerro Torre
 
-== 3. Verification Flow (Gatekeeper)
+Svalinn MUST function with images from any source:
+* Docker Hub, ghcr.io, Quay.io, any OCI-compliant registry
 
-When Vordr receives a container creation request:
+When attestation is not present:
+* Gatekeeper applies default policies
+* Security level is reduced (logged)
+* Optional: require attestation (strict mode)
 
-```
-VERIFICATION PROCEDURE:
+=== 5.2 No Runtime Dependencies
 
-1. LOOKUP attestation bundle for image digest
-   - Check OCI Referrers API
-   - Check local cache
-   - If not found: WARN (proceed with reduced trust)
+* No Cerro Torre daemon or service required
+* No network calls to Cerro Torre infrastructure
+* Trust store is local file (synced out-of-band)
 
-2. IF attestation bundle found:
-   a. PARSE bundle (defensive, fail on any error)
-   b. VERIFY image digest matches attestation subject
-   c. FOR EACH attestation in bundle:
-      i.  LOAD signer public key from trust store
-      ii. VERIFY Ed25519 signature
-      iii. VERIFY log inclusion proof (require 2-of-3 operators)
-   d. VERIFY threshold signature (k-of-n)
-   e. EXTRACT security requirements from attestation
+=== 5.3 No Code Dependencies
 
-3. APPLY Gatekeeper policy checks:
-   - No privilege escalation without explicit approval
-   - User namespace required for UID 0
-   - SYS_ADMIN requires privileged mode
-   - NET_ADMIN requires appropriate network mode
+* No shared libraries or modules
+* No FFI calls between projects
+* Only shared specifications (Verified Container Spec repo)
 
-4. IF all checks pass: ALLOW container creation
-   ELSE: REJECT with specific reason
-```
+== 6. Gatekeeper Implementation Requirements
 
-== 4. Gatekeeper Implementation Requirements
-
-=== 4.1 SPARK Verification Scope
+=== 6.1 SPARK Verification Scope
 
 The following MUST be SPARK-verified:
 
@@ -140,7 +125,7 @@ The following MUST be SPARK-verified:
 * Log inclusion proof verification
 * Policy rule evaluation
 
-=== 4.2 Security Properties (Formally Proven)
+=== 6.2 Security Properties (Formally Proven)
 
 ```ada
 package Gatekeeper
@@ -159,158 +144,40 @@ is
                     Meets_Threshold (Bundle, Trust));
 ```
 
-=== 4.3 Error Handling
+=== 6.3 Error Handling
 
 All verification failures MUST produce:
-* Stable error code (for automation)
+* Stable error code (from shared protocol)
 * Human-readable message
 * Audit log entry
 
-== 5. Attack Surface at the Seam
+== 7. Svalinn-Specific Extensions
 
-=== 5.1 Threat Model
+Beyond the shared protocol, Svalinn provides:
 
-Svalinn assumes:
-* Network is untrusted (MITM possible)
-* Registry may serve malicious content
-* Attestations may be forged or tampered
-* Time may be manipulated (use monotonic log indices)
+=== 7.1 Execution Attestation (Future)
 
-=== 5.2 Mitigations
+Svalinn can attest to successful execution:
 
-[cols="2,3"]
-|===
-| Threat | Mitigation
-
-| Malicious image content
-| Verify image digest matches attestation subject before any processing
-
-| Forged attestation
-| Ed25519 signature verification; threshold signing (k-of-n)
-
-| Replay of old attestation
-| Monotonic log indices; freshness requirements (optional)
-
-| Compromised single key
-| Threshold signing requires multiple keyholders
-
-| All keys compromised
-| Trust store pinning; out-of-band key verification
-
-| Malformed bundle (DoS)
-| Defensive parsing; size limits; SPARK-verified parser
-
-| Log operator compromise
-| Federated logs; require 2-of-3 agreement
-|===
-
-=== 5.3 Minimal Interface Principle
-
-Svalinn accepts from Cerro Torre:
-* OCI images (content-addressed by SHA256)
-* Attestation bundles (signed, logged)
-* Trust store updates (signed, versioned)
-
-Svalinn does NOT accept:
-* Executable code
-* Arbitrary configuration
-* Unsigned metadata
-* Out-of-band instructions
-
-== 6. Independence Guarantees
-
-=== 6.1 Svalinn Operates Without Cerro Torre
-
-Svalinn MUST function with images from any source:
-* Docker Hub
-* ghcr.io
-* Quay.io
-* Any OCI-compliant registry
-
-When attestation is not present:
-* Gatekeeper applies default policies
-* Security level is reduced (logged)
-* Optional: require attestation (strict mode)
-
-=== 6.2 No Runtime Dependencies
-
-* No Cerro Torre daemon or service required
-* No network calls to Cerro Torre infrastructure (except optional log verification)
-* Trust store is local file (synced out-of-band)
-
-== 7. Shared Security Baseline
-
-Both projects implement:
-
-=== 7.1 Cryptographic Algorithms
-
-* SHA-256, SHA-384, SHA-512: Content hashing
-* Ed25519: Signatures
-* FROST-Ed25519: Threshold signatures
-
-=== 7.2 Formal Verification (Ada/SPARK)
-
-* Cerro Torre: cerro_crypto, cerro_manifest, cerro_provenance
-* Svalinn: Gatekeeper policy validation
-
-Both prove:
-* Absence of runtime errors
-* Correct cryptographic operations
-* No information leakage
-
-=== 7.3 Common Formats
-
-| Format | Specification | Use |
-|--------|---------------|-----|
-| OCI Image | OCI Image Spec v1.1 | Container images |
-| in-toto | in-toto Statement v1 | Attestations |
-| SLSA | SLSA Provenance v1 | Build provenance |
-| Trust Store | Cerro Torre Trust Store v1 | Public keys |
-| CIL | SELinux CIL | Security policies |
-
-== 8. What Svalinn Needs to Implement
-
-=== 8.1 Attestation Verification (Gatekeeper)
-
-```rust
-// vordr/src/ffi/gatekeeper.rs
-extern "C" {
-    /// Initialize the Gatekeeper SPARK module
-    fn gatekeeper_init() -> i32;
-
-    /// Verify attestation bundle against trust store
-    /// Returns: 0 = verified, non-zero = error code
-    fn verify_attestation_bundle(
-        bundle_json: *const c_char,
-        image_digest: *const c_char,
-        trust_store: *const c_char
-    ) -> i32;
-
-    /// Validate container config against policies
-    /// Returns: 0 = allowed, non-zero = policy violation
-    fn validate_container_config(
-        oci_config: *const c_char,
-        attestation: *const c_char
-    ) -> i32;
+```json
+{
+  "predicateType": "https://svalinn.org/attestation/v1/execution",
+  "predicate": {
+    "image": { "digest": { "sha256": "..." } },
+    "gatekeeperVerified": true,
+    "executedAt": "2024-12-28T12:00:00Z",
+    "runtime": "vordr/0.1.0"
+  }
 }
 ```
 
-=== 8.2 Trust Store Management
+This closes the loop: build → verify → execute → attest.
 
-* Load trust store from local file
-* Verify trust store signature
-* Key lookup by ID
-* Threshold group resolution
+=== 7.2 SELinux Policy Application
 
-=== 8.3 Log Verification (Optional)
+When Cerro Torre includes CIL policies in attestations, Vordr can apply them.
 
-* Parse Merkle inclusion proofs
-* Verify proof against log public key
-* Cross-check multiple log operators
-
-== 9. Configuration
-
-=== 9.1 Verification Modes
+== 8. Configuration
 
 ```toml
 [gatekeeper]
@@ -327,42 +194,36 @@ trust_store = "/etc/vordr/trust-store.json"
 allow_unattested = true
 ```
 
-=== 9.2 Trust Store Updates
+== 9. Implementation Checklist
 
-Trust store is updated out-of-band:
-* Manual: Administrator copies new file
-* Automated: Signed update via HTTPS (future)
+=== 9.1 Must Implement (Shared Protocol)
 
-Updates MUST be signed by trust store update key (separate from release keys).
+* [ ] Verification protocol per shared spec
+* [ ] Trust store loading per shared spec
+* [ ] Log inclusion proof verification
+* [ ] FROST-Ed25519 threshold verification
+* [ ] OCI Referrers API bundle fetch
 
-== 10. Future Considerations
+=== 9.2 Should Implement (Svalinn Specific)
 
-=== 10.1 Execution Attestation
+* [ ] Execution attestation generation
+* [ ] SELinux CIL policy application
+* [ ] Runtime telemetry (opt-in)
 
-Svalinn could attest to successful execution:
+== 10. Non-Goals
 
-```json
-{
-  "predicateType": "https://svalinn.org/attestation/v1/execution",
-  "predicate": {
-    "image": { "digest": { "sha256": "..." } },
-    "gatekeeperVerified": true,
-    "executedAt": "2024-12-28T12:00:00Z",
-    "runtime": "vordr/0.1.0"
-  }
-}
-```
+The following are explicitly *not* part of this integration:
 
-This closes the loop: build → verify → execute → attest.
-
-=== 10.2 Feedback to Cerro Torre
-
-Optional telemetry (privacy-preserving):
-* Policy violation patterns
-* Common misconfigurations
-* Vulnerability matches at runtime
+* Real-time communication between projects
+* Shared runtime or daemon processes
+* Unified configuration format
+* Merged governance or decision-making
+* Single trust root (each has independent trust)
 
 == 11. Changelog
+
+=== 0.2.0 (2024-12-28)
+- Refactored to reference shared Verified Container Spec
 
 === 0.1.0-draft (2024-12-28)
 - Initial specification
